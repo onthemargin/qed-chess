@@ -68,6 +68,11 @@ Environment (all optional):
 | `QED_LLM_DISABLED` | unset | `1` disables the LLM path entirely (bubbles and the parser still work) |
 | `QED_RATE_LIMIT_PER_HOUR` | `30` | LLM calls per client IP (`X-Real-IP`, else peer) per hour |
 | `QED_DAILY_LLM_CAP` | `2000` | process-wide LLM calls per UTC day |
+| `QED_SOLVE_LIMIT_PER_HOUR` | `600` | questions (Z3 solves) per client IP per hour; 429 beyond |
+| `QED_MOVE_LIMIT_PER_HOUR` | `1800` | play / engine / replay calls per client IP per hour |
+| `QED_SOLVE_QUEUE` | `6` | questions allowed in flight before the server answers 503 |
+| `QED_Z3_TIMEOUT_MS` | `2000` | Z3 time per `check()`; a timeout is reported as an error, never as UNSAT |
+| `QED_SOLVE_DEADLINE_S` | `6` | wall-clock budget for one question including refinements |
 
 Production: Alpine image, Z3 from the `py3-z3` apk package (PyPI has no musl
 wheels), venv created with `--system-site-packages`, Stockfish compiled in a
@@ -99,6 +104,11 @@ builder stage. Start: `uvicorn app.main:app --host 127.0.0.1 --port 3006`.
   has no free-form URL field and is validated after parsing.
 - No inline scripts or styles are served (asserted by tests), so the page runs
   under the nginx CSP without exceptions.
+- All Z3 work is serialized under one process-wide lock (libz3's default
+  context is single-threaded by design), each solve has a timeout and a
+  wall-clock deadline, the solver and move endpoints are rate-limited per
+  client, and a small in-flight cap returns 503 instead of queueing without
+  bound.
 - The per-IP rate limit keys on `X-Real-IP` when present. The app is meant to
   sit behind a reverse proxy that sets that header from the real peer address
   (nginx in production); if you expose uvicorn directly, clients can spoof it,

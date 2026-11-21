@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import chess
+import os
+import threading
+import time
+
 import z3
 
 from . import queries, truth
@@ -12,6 +16,11 @@ from .base import MoveModel
 
 SCOPE_BASE = "single move, this position; castling and en passant are outside the Z3 model"
 MAX_REFINEMENTS = 256   # candidate moves that fail the python-chess cross-check before we give up
+# libz3's default context is NOT thread-safe: two solves on different threads corrupt it and segfault
+# the process. Every Z3 call goes through this one lock (the engine uses the same pattern).
+_Z3_LOCK = threading.Lock()
+Z3_TIMEOUT_MS = int(os.environ.get("QED_Z3_TIMEOUT_MS", "2000"))        # per solver.check()
+SOLVE_DEADLINE_S = float(os.environ.get("QED_SOLVE_DEADLINE_S", "6"))   # whole question incl. refinements
 
 
 @dataclass
@@ -46,8 +55,20 @@ def _code(lines: list[str], exclude: list[str], result_line: str) -> str:
 
 
 def solve(board: chess.Board, constraints: list[dict], exclude: list[str] | None = None) -> Result:
+    with _Z3_LOCK:
+        return _solve(board, constraints, exclude)
+
+
+def _timed_out(texts, scope) -> Result:
+    return Result("ERROR", constraints_text=texts, scope=scope,
+                  message="the solver timed out on this question; try fewer conditions.")
+
+
+def _solve(board: chess.Board, constraints: list[dict], exclude: list[str] | None = None) -> Result:
     exclude = list(exclude or [])
+    deadline = time.monotonic() + SOLVE_DEADLINE_S
     m = MoveModel(board)
+    m.solver.set("timeout", Z3_TIMEOUT_MS)
     trackers, texts, lines = [], [], []
     for i, c in enumerate(constraints):
         expr, text, line = queries.build(m, c)
@@ -65,7 +86,10 @@ def solve(board: chess.Board, constraints: list[dict], exclude: list[str] | None
         scope += "; mate confirmed by python-chess, not proved inside Z3"
 
     for _ in range(MAX_REFINEMENTS):
-        if m.solver.check(*trackers) != z3.sat:
+        verdict = m.solver.check(*trackers)
+        if verdict == z3.unknown or time.monotonic() > deadline:
+            return _timed_out(texts, scope)
+        if verdict != z3.sat:
             break
         mv = m.model_move(m.solver.model())
         if mv not in board.legal_moves:

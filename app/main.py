@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from pathlib import Path
 
 import chess
@@ -143,8 +144,12 @@ def _validate_constraints(cons) -> list[dict]:
 
 
 def _validate_exclude(ex, board) -> list[str]:
+    if ex is None:
+        return []
+    if not isinstance(ex, list):
+        raise HTTPException(400, "exclude must be a list of moves")
     out = []
-    for u in ex or []:
+    for u in ex:
         try:
             mv = chess.Move.from_uci(str(u))
         except ValueError:
@@ -172,6 +177,13 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
     templates.env.globals["V"] = hashlib.sha256((static / "app.css").read_bytes() + (static / "app.js").read_bytes()).hexdigest()[:10]
     limiter = RateLimiter(settings.rate_limit_per_hour)
     daily = DailyCap(settings.daily_llm_cap)
+    solve_limiter = RateLimiter(settings.solve_limit_per_hour)
+    move_limiter = RateLimiter(settings.move_limit_per_hour)
+    app.state.solve_slots = threading.BoundedSemaphore(settings.solve_queue)
+
+    def throttle(limiter_, request: Request, what: str) -> None:
+        if not limiter_.allow(client_ip(request)):
+            raise HTTPException(429, f"Too many {what} from your address this hour; please slow down.")
 
     if gemini_client is None and not settings.llm_disabled:
         try:
@@ -265,7 +277,10 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
                 meta["source"] = "action"; meta["action"] = parsed["action"]
                 ctx = payload.context or {}
                 if parsed["action"] == "another" and ctx.get("constraints") is not None:
-                    excl = list(ctx.get("exclude") or []) + ([ctx["move"]] if ctx.get("move") else [])
+                    prior = ctx.get("exclude") or []
+                    if not isinstance(prior, list) or not isinstance(ctx.get("move"), (str, type(None))):
+                        raise HTTPException(400, "bad context")
+                    excl = list(prior) + ([ctx["move"]] if ctx.get("move") else [])
                     query = {"constraints": ctx["constraints"], "exclude": excl}
                 elif parsed["action"] == "another":
                     return chat(board, "Ask a question first, then I can show another solution.")
@@ -280,7 +295,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
         if query is None:
             return unsupported(board, text)
         constraints = _validate_constraints(query.get("constraints", []))
-        exclude = _validate_exclude((query.get("exclude") or []) + (payload.exclude or []), board)
+        exclude = (_validate_exclude(query.get("exclude"), board) + _validate_exclude(payload.exclude, board))[:64]
         return run_query(board, constraints, exclude)
 
     def answer_logged(payload: AskIn, request: Request) -> dict:
@@ -288,7 +303,13 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
         text = (payload.text or "").strip()
         with logged("ask", request, ip=ip_hash(client_ip(request)), fen=payload.fen, ply=len(payload.moves),
                     text=text[:300] or None) as meta:
-            data = answer(payload, request, meta)
+            throttle(solve_limiter, request, "questions")
+            if not app.state.solve_slots.acquire(blocking=False):
+                raise HTTPException(503, "The solver is busy right now; try again in a moment.")
+            try:
+                data = answer(payload, request, meta)
+            finally:
+                app.state.solve_slots.release()
             meta.setdefault("status", data.get("status"))
             if data.get("model"):
                 meta["move"] = data["model"]["move"]
@@ -371,6 +392,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
     def play(payload: PlayIn, request: Request):
         with logged("play", request, ip=ip_hash(client_ip(request)), fen=payload.fen, ply=len(payload.moves),
                     preset=payload.preset, move=payload.move) as meta:
+            throttle(move_limiter, request, "moves")
             return _play(payload, meta)
 
     def _play(payload: PlayIn, meta: dict) -> dict:
@@ -399,6 +421,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
         """The engine moves for whichever side is to move: used when the human switches colours."""
         with logged("engine", request, ip=ip_hash(client_ip(request)), fen=payload.fen, ply=len(payload.moves),
                     preset=payload.preset) as meta:
+            throttle(move_limiter, request, "moves")
             board = _board(payload.fen)
             out = {"reply": None, "engine": None, "game_over": board.is_game_over(),
                    "result": board.result() if board.is_game_over() else None, "in_check": board.is_check()}
@@ -408,6 +431,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
     @r.post("/api/replay")
     def replay(payload: ReplayIn, request: Request):
         with logged("replay", request, ply=len(payload.moves)) as meta:
+            throttle(move_limiter, request, "moves")
             board = chess.Board()
             sans = []
             for u in payload.moves:
