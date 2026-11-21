@@ -21,7 +21,7 @@ from . import bubbles as bubbles_mod
 from . import explain, intent
 from .config import Settings
 from .engine import PRESETS, Engine
-from .eventlog import Timer, event, ids, ip_hash
+from .eventlog import Timer, ip_hash, logged
 from .eventlog import configure as configure_logging
 from .gemini import MAX_INPUT, GeminiClient, GeminiError, default_project
 from .ratelimit import DailyCap, RateLimiter
@@ -227,13 +227,15 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
             if len(text) > MAX_INPUT * 4:
                 raise HTTPException(400, "message too long")
             parsed = intent.parse(text, board)
-            meta["source"] = "typed" if parsed is not None else "llm"
+            meta["source"] = "typed" if parsed is not None else "unparsed"
             if parsed is None and app.state.gemini is not None:
                 ip = client_ip(request)
                 if not limiter.allow(ip):
                     raise HTTPException(429, "Too many questions for the assistant from this address; try the suggested questions.")
                 if not daily.allow():
+                    meta["source"] = "capped"
                     return unsupported(board, text)
+                meta["source"] = "llm"
                 llm_t = Timer()
                 try:
                     out = app.state.gemini.classify(text, payload.fen, payload.history)
@@ -270,8 +272,9 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
 
     def answer_logged(payload: AskIn, request: Request) -> dict:
         """answer() plus one `ask` event, whatever the outcome."""
-        t, meta = Timer(), {}
-        try:
+        text = (payload.text or "").strip()
+        with logged("ask", request, ip=ip_hash(client_ip(request)), fen=payload.fen, ply=len(payload.moves),
+                    text=text[:300] or None) as meta:
             data = answer(payload, request, meta)
             meta.setdefault("status", data.get("status"))
             if data.get("model"):
@@ -282,13 +285,6 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
                     meta["exclude"] = data["query"]["exclude"]
             meta["answer"] = (data.get("answer") or "")[:160]
             return data
-        except HTTPException as e:
-            meta["error"] = f"{e.status_code} {e.detail}"
-            raise
-        finally:
-            text = (payload.text or "").strip()
-            event("ask", **ids(request), ip=ip_hash(client_ip(request)), fen=payload.fen, ply=len(payload.moves),
-                  text=text[:300] or None, ms=t.ms(), **meta)
 
     # ---------------------------------------------------------------- routes
     @r.get("/", response_class=HTMLResponse)
@@ -345,16 +341,24 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
         return {"moves": [m.uci() for m in board.legal_moves], "in_check": board.is_check(),
                 "game_over": board.is_game_over(), "result": board.result() if board.is_game_over() else None}
 
+    def _engine_reply(board: chess.Board, preset: str, out: dict, meta: dict) -> None:
+        """Let the engine answer on `board` (mutated) and record the reply in `out` and the event `meta`."""
+        if not board.is_game_over():
+            reply, kind = engine.best_move(board, preset)
+            san = board.san(reply)
+            board.push(reply)
+            out["reply"] = {"uci": reply.uci(), "san": san, "fen": board.fen()}
+            out["engine"] = kind
+            out.update(game_over=board.is_game_over(), result=board.result() if board.is_game_over() else None,
+                       in_check=board.is_check())
+        meta.update(reply=out["reply"]["san"] if out["reply"] else None, engine=out["engine"],
+                    game_over=out["game_over"], result=out["result"])
+
     @r.post("/api/play")
     def play(payload: PlayIn, request: Request):
-        t, meta = Timer(), {}
-        try:
+        with logged("play", request, ip=ip_hash(client_ip(request)), fen=payload.fen, ply=len(payload.moves),
+                    preset=payload.preset, move=payload.move) as meta:
             return _play(payload, meta)
-        except HTTPException as e:
-            meta["error"] = f"{e.status_code} {e.detail}"
-            raise
-        finally:
-            event("play", **ids(request), fen=payload.fen, ply=len(payload.moves), preset=payload.preset, move=payload.move, ms=t.ms(), **meta)
 
     def _play(payload: PlayIn, meta: dict) -> dict:
         board = _board(payload.fen)
@@ -374,61 +378,38 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
         out = {"human": {"uci": mv.uci(), "san": human_san, "fen": board.fen()}, "reply": None,
                "game_over": board.is_game_over(), "result": board.result() if board.is_game_over() else None,
                "in_check": board.is_check(), "engine": None}
-        if not board.is_game_over():
-            reply, kind = engine.best_move(board, payload.preset)
-            san = board.san(reply)
-            board.push(reply)
-            out["reply"] = {"uci": reply.uci(), "san": san, "fen": board.fen()}
-            out["engine"] = kind
-            out.update(game_over=board.is_game_over(), result=board.result() if board.is_game_over() else None,
-                       in_check=board.is_check())
-        meta.update(reply=out["reply"]["san"] if out["reply"] else None, engine=out["engine"], game_over=out["game_over"], result=out["result"])
+        _engine_reply(board, payload.preset, out, meta)
         return out
 
     @r.post("/api/engine")
     def engine_move(payload: EngineIn, request: Request):
         """The engine moves for whichever side is to move: used when the human switches colours."""
-        t, meta = Timer(), {}
-        try:
-            return _engine_move(payload, meta)
-        except HTTPException as e:
-            meta["error"] = f"{e.status_code} {e.detail}"
-            raise
-        finally:
-            event("engine", **ids(request), fen=payload.fen, ply=len(payload.moves), preset=payload.preset, ms=t.ms(), **meta)
-
-    def _engine_move(payload: EngineIn, meta: dict) -> dict:
-        board = _board(payload.fen)
-        out = {"reply": None, "engine": None, "game_over": board.is_game_over(),
-               "result": board.result() if board.is_game_over() else None, "in_check": board.is_check()}
-        if not board.is_game_over():
-            reply, kind = engine.best_move(board, payload.preset)
-            san = board.san(reply)
-            board.push(reply)
-            out["reply"] = {"uci": reply.uci(), "san": san, "fen": board.fen()}
-            out["engine"] = kind
-            out.update(game_over=board.is_game_over(), result=board.result() if board.is_game_over() else None,
-                       in_check=board.is_check())
-        meta.update(reply=out["reply"]["san"] if out["reply"] else None, engine=out["engine"], game_over=out["game_over"], result=out["result"])
-        return out
+        with logged("engine", request, ip=ip_hash(client_ip(request)), fen=payload.fen, ply=len(payload.moves),
+                    preset=payload.preset) as meta:
+            board = _board(payload.fen)
+            out = {"reply": None, "engine": None, "game_over": board.is_game_over(),
+                   "result": board.result() if board.is_game_over() else None, "in_check": board.is_check()}
+            _engine_reply(board, payload.preset, out, meta)
+            return out
 
     @r.post("/api/replay")
     def replay(payload: ReplayIn, request: Request):
-        event("replay", **ids(request), ply=len(payload.moves))
-        board = chess.Board()
-        sans = []
-        for u in payload.moves:
-            try:
-                mv = chess.Move.from_uci(u)
-            except ValueError:
-                raise HTTPException(400, f"bad move {u!r}")
-            if mv not in board.legal_moves:
-                raise HTTPException(400, f"illegal move {u!r}")
-            sans.append(board.san(mv))
-            board.push(mv)
-        return {"fen": board.fen(), "sans": sans, "in_check": board.is_check(), "game_over": board.is_game_over(),
-                "result": board.result() if board.is_game_over() else None,
-                "legal": [m.uci() for m in board.legal_moves]}
+        with logged("replay", request, ply=len(payload.moves)) as meta:
+            board = chess.Board()
+            sans = []
+            for u in payload.moves:
+                try:
+                    mv = chess.Move.from_uci(u)
+                except ValueError:
+                    raise HTTPException(400, f"bad move {u!r}")
+                if mv not in board.legal_moves:
+                    raise HTTPException(400, f"illegal move {u!r}")
+                sans.append(board.san(mv))
+                board.push(mv)
+            meta["fen"] = board.fen()
+            return {"fen": board.fen(), "sans": sans, "in_check": board.is_check(), "game_over": board.is_game_over(),
+                    "result": board.result() if board.is_game_over() else None,
+                    "legal": [m.uci() for m in board.legal_moves]}
 
     @r.get("/manifest.webmanifest")
     def manifest():

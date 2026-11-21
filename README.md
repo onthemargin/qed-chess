@@ -103,9 +103,13 @@ builder stage. Start: `uvicorn app.main:app --host 127.0.0.1 --port 3006`.
   sit behind a reverse proxy that sets that header from the real peer address
   (nginx in production); if you expose uvicorn directly, clients can spoof it,
   so strip or ignore the header at your edge.
-- The server is stateless: games and chat live in the browser's localStorage.
-  Nothing a player types is stored server-side; typed questions are sent to
-  Vertex AI only when the deterministic parser cannot handle them.
+- The server keeps no game state: games and chat live in the browser's
+  localStorage. What the server does keep is the event log described under
+  "Debugging with logs": each question's text, the position, the answer, a
+  per-browser id and a keyed hash of the client address, for as long as the
+  Cloud Logging retention is set to (the project default is 30 days). Typed
+  questions are sent to Vertex AI only when the deterministic parser cannot
+  handle them.
 
 ## Debugging with logs
 
@@ -121,9 +125,13 @@ Every ask, play, engine move and replay writes one JSON line to stdout
   and sent as `X-QED-Session` / `X-QED-Game`. Filter on `gid` to replay one
   game with its chat in order.
 - `source` says how a question was resolved: `bubble`, `typed` (deterministic
-  parser), `llm` (Gemini; `llm_kind`, `llm_ms`, `llm_error` follow) or `action`.
-- `error` carries the HTTP status and reason for rejected requests; `ip` is a
-  short hash of the client address, never the address itself.
+  parser), `llm` (Gemini was called; `llm_kind`, `llm_ms`, `llm_error` follow),
+  `unparsed` (parser failed and no LLM is configured, or the client is
+  rate-limited), `capped` (daily LLM budget spent) or `action`.
+- `error` carries the HTTP status and reason for rejected requests, or
+  `500 <ExceptionName>` for crashes; `ip` is a short keyed hash of the client
+  address (HMAC with a per-process key, or `QED_IP_HASH_KEY` if set), so it
+  correlates one address without being reversible.
 - `QED_LOG_LEVEL` (default `INFO`) controls the `qed.*` loggers.
 
 On Cloud Run each line is ingested as a structured `jsonPayload`, so filter on

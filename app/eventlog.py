@@ -7,12 +7,17 @@ game can be followed end to end. Client addresses are logged as a short hash, ne
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import sys
 import time
+from contextlib import contextmanager
+
+from fastapi import HTTPException
 
 log = logging.getLogger("qed.events")
 _ID = re.compile(r"^[A-Za-z0-9_-]{4,40}$")
@@ -44,8 +49,14 @@ def ids(request) -> dict:
     return out
 
 
+# Per-process random key: the hash correlates one address within a process's logs but cannot be
+# reversed by hashing the IPv4 space (an unkeyed sha256 could). Set QED_IP_HASH_KEY to keep the
+# correlation stable across restarts and instances.
+_IP_KEY = (os.environ.get("QED_IP_HASH_KEY") or secrets.token_hex(16)).encode()
+
+
 def ip_hash(ip: str) -> str:
-    return hashlib.sha256(ip.encode("utf-8", "replace")).hexdigest()[:10]
+    return hmac.new(_IP_KEY, ip.encode("utf-8", "replace"), hashlib.sha256).hexdigest()[:10]
 
 
 def event(ev: str, **fields) -> None:
@@ -60,3 +71,23 @@ class Timer:
 
     def ms(self) -> int:
         return int((time.monotonic() - self.t0) * 1000)
+
+
+@contextmanager
+def logged(ev: str, request, **base):
+    """Emit one event when the block ends, whatever happened inside it.
+
+    Yields a dict the handler fills in (status, move, ...). HTTP rejections are tagged
+    `error="<status> <detail>"`, anything else `error="500 <ExceptionName>"`; both re-raise.
+    """
+    t, meta = Timer(), {}
+    try:
+        yield meta
+    except HTTPException as e:
+        meta["error"] = f"{e.status_code} {e.detail}"
+        raise
+    except Exception as e:
+        meta["error"] = f"500 {type(e).__name__}"
+        raise
+    finally:
+        event(ev, **ids(request), **base, ms=t.ms(), **meta)

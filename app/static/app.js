@@ -331,7 +331,7 @@
   // ---- boot
   (async function boot() {
     const saved = load('qed.state', null);
-    if (saved && saved.fen) { Object.assign(state, saved); if (saved.human !== 'w' && saved.human !== 'b') state.human = 'w'; delete state.flipped; if (!state.gid) state.gid = rid(); }
+    if (saved && saved.fen) { Object.assign(state, saved); if (saved.human !== 'w' && saved.human !== 'b') state.human = 'w'; delete state.flipped; }   // a saved state without gid keeps the fresh one from the initial state
     $('#preset').value = state.preset;
     const chat = load('qed.chat', '');
     if (chat) { $('#transcript').innerHTML = chat; htmx.process($('#transcript')); }

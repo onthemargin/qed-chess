@@ -105,3 +105,60 @@ def test_client_sends_session_and_game_ids():
     js = (Path(__file__).resolve().parent.parent / "app" / "static" / "app.js").read_text()
     assert "'X-QED-Session'" in js and "'X-QED-Game'" in js and "qed.sid" in js
     assert "htmx:configRequest" in js and "e.detail.headers" in js
+
+
+# ---- review findings 2026-11-21
+
+def test_ip_hash_is_keyed_not_a_bare_sha256():
+    import hashlib
+    from app.eventlog import ip_hash
+    assert ip_hash("1.2.3.4") != hashlib.sha256(b"1.2.3.4").hexdigest()[:10]
+    assert ip_hash("1.2.3.4") == ip_hash("1.2.3.4") and ip_hash("1.2.3.4") != ip_hash("1.2.3.5")
+
+
+def test_unexpected_server_errors_are_tagged_500(events, monkeypatch):
+    from app import main as main_mod
+    monkeypatch.setattr(main_mod.solve_mod, "solve", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    c = make_client()
+    with pytest.raises(RuntimeError):
+        c.post("/qed-chess/api/ask", json={"fen": ITALIAN, "moves": [], "query": {"constraints": [{"kind": "gives_check"}]}})
+    e = events("ask")[-1]
+    assert e["error"] == "500 RuntimeError" and "status" not in e
+
+
+def test_source_says_llm_only_when_gemini_was_called(events):
+    c = make_client()   # llm disabled
+    c.post("/qed-chess/api/ask", json={"fen": START, "moves": [], "text": "tell me a joke"})
+    e = events("ask")[-1]
+    assert e["source"] == "unparsed" and "llm_ms" not in e and e["status"] == "UNSUPPORTED"
+    gem = FakeGemini({"kind": "chat", "constraints": None, "reply": "x"})
+    c = make_client(llm_disabled=False, gemini=gem, daily_llm_cap=0)
+    c.post("/qed-chess/api/ask", json={"fen": START, "moves": [], "text": "tell me a joke"})
+    e = events("ask")[-1]
+    assert e["source"] == "capped" and gem.calls == []
+    c = make_client(llm_disabled=False, gemini=gem)
+    c.post("/qed-chess/api/ask", json={"fen": START, "moves": [], "text": "tell me a joke"})
+    assert events("ask")[-1]["source"] == "llm"
+
+
+def test_replay_event_records_result_timing_and_errors(events):
+    c = make_client()
+    c.post("/qed-chess/api/replay", json={"moves": ["e2e4", "e7e5"]}, headers=TRACE)
+    e = events("replay")[-1]
+    assert e["ply"] == 2 and isinstance(e["ms"], int) and e["fen"].split()[1] == "w"
+    assert c.post("/qed-chess/api/replay", json={"moves": ["e2e4", "e2e4"]}).status_code == 400
+    assert events("replay")[-1]["error"].startswith("400")
+
+
+def test_client_has_no_dead_gid_backfill():
+    from pathlib import Path
+    js = (Path(__file__).resolve().parent.parent / "app" / "static" / "app.js").read_text()
+    assert "if (!state.gid) state.gid = rid();" not in js
+
+
+def test_readme_privacy_section_describes_the_logging():
+    from pathlib import Path
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    assert "Nothing a player types is stored server-side" not in readme
+    sec = readme.split("## Security notes", 1)[1].split("\n## ", 1)[0]
+    assert "log" in sec.lower() and "retention" in sec.lower()
