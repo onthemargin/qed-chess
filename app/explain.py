@@ -14,10 +14,12 @@ CLAUSES = {
 }
 
 
-def _clause(c: dict) -> str:
+def _clause(c: dict, move: chess.Move | None = None) -> str:
     k = c["kind"]
     if k in CLAUSES:
         return CLAUSES[k]
+    if k == "piece_safe" and move is not None and move.from_square == chess.parse_square(c["square"]):
+        return f"stays safe on {chess.square_name(move.to_square)}"   # the piece itself moved
     if k == "piece_is":
         return f"with the {c['piece']}"
     if k == "piece_not":
@@ -43,14 +45,19 @@ def _clause(c: dict) -> str:
     return k.replace("_", " ")
 
 
-def answer_text(res: Result, constraints: list[dict]) -> str:
+def answer_text(res: Result, constraints: list[dict], board: chess.Board | None = None) -> str:
     if res.status == "SAT":
         qualifiers = {"piece_is", "piece_not", "to_square", "from_square", "to_color", "to_side"}
-        effects = [_clause(c) for c in constraints if c["kind"] not in qualifiers]
-        quals = [_clause(c) for c in constraints if c["kind"] in qualifiers]
-        parts = [" and ".join(effects) if effects else "is a legal move"] + quals
+        effects = [_clause(c, res.move) for c in constraints if c["kind"] not in qualifiers]
+        quals = [_clause(c, res.move) for c in constraints if c["kind"] in qualifiers]
+        fallback = "gets out of check" if board is not None and board.is_check() else "is a legal move"
+        parts = [" and ".join(effects) if effects else fallback] + quals
         return f"Yes. {res.san} {' '.join(parts)}."
     if res.status == "UNSAT":
+        if res.special_moves:
+            kinds = sorted({"castling" if s.startswith("O-O") else "en passant" for s in res.special_moves})
+            return (f"Not with an ordinary move, but {' or '.join(kinds)} would do it: {', '.join(res.special_moves)}. "
+                    f"Castling and en passant sit outside the Z3 model, so python-chess answered that part.")
         if not constraints:
             return "No legal move exists here."
         if len(constraints) == 1:
@@ -74,10 +81,11 @@ def highlights(board: chess.Board, res: Result, constraints: list[dict]) -> dict
         for a in after.attackers(board.turn, ek):
             arrows.append([chess.square_name(a), chess.square_name(ek)])
         squares.append(chess.square_name(ek))
-    if "fork" in kinds or "attacks_piece" in kinds:
+    wanted = {truth.piece_type(c["piece"]) for c in constraints if c["kind"] == "attacks_piece"}
+    if "fork" in kinds or wanted:
         for s in after.attacks(mv.to_square):
             p = after.piece_at(s)
-            if p and p.color == them and p.piece_type != chess.PAWN:
+            if p and p.color == them and (p.piece_type in wanted or ("fork" in kinds and p.piece_type != chess.PAWN)):
                 arrows.append([to, chess.square_name(s)])
                 squares.append(chess.square_name(s))
     for c in constraints:
@@ -85,7 +93,7 @@ def highlights(board: chess.Board, res: Result, constraints: list[dict]) -> dict
             arrows.append([to, c["square"]])
             squares.append(c["square"])
         if c["kind"] in ("defends", "piece_safe"):
-            squares.append(c["square"])
+            squares.append(to if c["kind"] == "piece_safe" and c["square"] == frm else c["square"])
     if "pin" in kinds:
         for v, b in truth.pins_after(board, mv):
             arrows.append([to, chess.square_name(b)])

@@ -51,8 +51,11 @@ def _state_bubbles(board: chess.Board) -> list[dict]:
     if board.is_check():
         out += [q("Show me a way out of check"),
                 q("Can I block instead of moving the king?", {"kind": "piece_not", "piece": "king"}, {"kind": "not_captures"}),
-                q("Can I escape without moving my king?", {"kind": "piece_not", "piece": "king"}),
-                q("Can I capture the checking piece?", {"kind": "captures"})]
+                q("Can I escape without moving my king?", {"kind": "piece_not", "piece": "king"})]
+        checkers = list(board.checkers())
+        if len(checkers) == 1:   # in a double check no capture helps, so do not offer one
+            out.append(q("Can I capture the checking piece?", {"kind": "captures"},
+                         {"kind": "to_square", "square": chess.square_name(checkers[0])}))
         return out
 
     # most valuable enemy piece we can capture, and whether it is undefended
@@ -82,8 +85,9 @@ def _state_bubbles(board: chess.Board) -> list[dict]:
         out.append(q("Can I promote a pawn?", {"kind": "promotes"}))
     if board.fullmove_number <= 6 and non_pawn >= 10:
         out += [q("Can I develop a piece safely?", {"kind": "develops"}, {"kind": "safe"}),
-                q("Can I give check?", {"kind": "gives_check"}),
-                q("Can I attack the queen?", {"kind": "attacks_piece", "piece": "queen"})]
+                q("Can I give check?", {"kind": "gives_check"})]
+        if any(p == chess.Piece(chess.QUEEN, them) for p in board.piece_map().values()):
+            out.append(q("Can I attack the queen?", {"kind": "attacks_piece", "piece": "queen"}))
     elif non_pawn <= 4:
         out += [q("Is there a mate in 1?", {"kind": "mate_in_1"}),
                 q("Can I give check safely?", {"kind": "gives_check"}, {"kind": "safe"}),

@@ -11,7 +11,7 @@ from . import queries, truth
 from .base import MoveModel
 
 SCOPE_BASE = "single move, this position; castling and en passant are outside the Z3 model"
-MAX_REFINEMENTS = 64
+MAX_REFINEMENTS = 256   # candidate moves that fail the python-chess cross-check before we give up
 
 
 @dataclass
@@ -26,15 +26,17 @@ class Result:
     drop_one: list[dict] = field(default_factory=list)
     message: str = ""
     model_values: dict = field(default_factory=dict)
+    special_moves: list[str] = field(default_factory=list)   # castling / en passant moves (SAN) that would satisfy the question
 
 
-def _special_only(board: chess.Board, constraints: list[dict]) -> list[str]:
-    """Castling / en passant moves that would satisfy the constraints."""
-    out = []
+def _special_only(board: chess.Board, constraints: list[dict]) -> tuple[list[str], list[str]]:
+    """Castling / en passant moves that would satisfy the constraints: (kinds, SAN moves)."""
+    kinds, sans = [], []
     for mv in board.legal_moves:
         if (board.is_castling(mv) or board.is_en_passant(mv)) and all(truth.holds(board, mv, c) for c in constraints):
-            out.append("en passant" if board.is_en_passant(mv) else "castling")
-    return sorted(set(out))
+            kinds.append("en passant" if board.is_en_passant(mv) else "castling")
+            sans.append(board.san(mv))
+    return sorted(set(kinds)), sans
 
 
 def _code(lines: list[str], exclude: list[str], result_line: str) -> str:
@@ -82,8 +84,13 @@ def solve(board: chess.Board, constraints: list[dict], exclude: list[str] | None
         return Result("SAT", move=mv, san=board.san(mv), constraints_text=texts,
                       z3_code=_code(lines, exclude, result_line), scope=scope, model_values=vals)
 
-    # UNSAT (or refinements exhausted)
-    specials = _special_only(board, constraints)
+    else:
+        return Result("ERROR", constraints_text=texts, scope=scope,
+                      message=f"gave up after {MAX_REFINEMENTS} candidate moves failed the python-chess cross-check; "
+                              "this question needs more refinement than one session allows.")
+
+    # UNSAT
+    specials, special_moves = _special_only(board, constraints)
     if specials:
         scope += f"; a {' / '.join(specials)} move would satisfy this, which Z3 does not model"
     core = []
@@ -96,7 +103,7 @@ def solve(board: chess.Board, constraints: list[dict], exclude: list[str] | None
             drop_one.append({"kind": constraints[i]["kind"], "text": texts[i],
                              "sat_without": m.solver.check(*others) == z3.sat})
     return Result("UNSAT", constraints_text=texts, z3_code=_code(lines, exclude, "# check() -> unsat"),
-                  scope=scope, unsat_core=core, drop_one=drop_one)
+                  scope=scope, unsat_core=core, drop_one=drop_one, special_moves=special_moves)
 
 
 def enumerate_solutions(board: chess.Board, constraints: list[dict], limit: int = 100) -> list[chess.Move]:

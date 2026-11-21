@@ -86,6 +86,15 @@ def pins_after(board: chess.Board, move: chess.Move) -> list[tuple[int, int]]:
     return out
 
 
+def ep_capturable(after: chess.Board, sq: int) -> bool:
+    """The pawn that just double-stepped to `sq` can be taken en passant (an enemy pawn stands beside it).
+    Like is_attacked_by(), this ignores whether that capture would be legal for the enemy's own king."""
+    if after.ep_square is None or after.piece_at(sq) != chess.Piece(chess.PAWN, not after.turn):
+        return False
+    f, r = chess.square_file(sq), chess.square_rank(sq)
+    return any(0 <= f + d < 8 and after.piece_at(chess.square(f + d, r)) == chess.Piece(chess.PAWN, after.turn) for d in (-1, 1))
+
+
 def holds(board: chess.Board, move: chess.Move, c: dict) -> bool:
     kind = c["kind"]
     us = board.turn
@@ -129,7 +138,7 @@ def holds(board: chess.Board, move: chess.Move, c: dict) -> bool:
     after = board.copy(stack=False)
     after.push(move)
     if kind == "safe":
-        return not after.is_attacked_by(them, move.to_square)
+        return not after.is_attacked_by(them, move.to_square) and not ep_capturable(after, move.to_square)
     if kind == "attacks_square":
         return square(c["square"]) in after.attacks(move.to_square)
     if kind == "attacks_piece":
@@ -146,7 +155,7 @@ def holds(board: chess.Board, move: chess.Move, c: dict) -> bool:
         if board.color_at(x) != us:
             return False
         target = move.to_square if move.from_square == x else x
-        return not after.is_attacked_by(them, target)
+        return not after.is_attacked_by(them, target) and not (target == move.to_square and ep_capturable(after, target))
     if kind == "defends":
         x = square(c["square"])
         if board.color_at(x) != us or move.from_square == x:

@@ -87,6 +87,17 @@ def _at_label(fen: str, moves: list[str]) -> str:
     return f"move {n} · {'White' if board.turn else 'Black'} to move"
 
 
+def _castling_answer(board: chess.Board, side: str | None) -> str:
+    """Castling is outside the Z3 model, so the rules engine answers it directly."""
+    moves = [mv for mv in board.legal_moves if board.is_castling(mv)
+             and (side is None or (side == "kingside") == board.is_kingside_castling(mv))]
+    where = f" {side}" if side else ""
+    if moves:
+        return (f"Castling is outside the Z3 model, but python-chess says {' or '.join(board.san(mv) for mv in moves)} "
+                f"is legal here.")
+    return f"You cannot castle{where} right now, according to python-chess (castling is outside the Z3 model)."
+
+
 def _board(fen: str) -> chess.Board:
     try:
         b = chess.Board(fen)
@@ -187,7 +198,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
                 "move": res.move.uci() if res.move else None}
         return {
             "status": res.status if res.status in ("SAT", "UNSAT") else "ERROR",
-            "answer": explain.answer_text(res, constraints),
+            "answer": explain.answer_text(res, constraints, board),
             "scope": res.scope,
             "constraints": res.constraints_text,
             "model": {"move": res.move.uci(), "san": res.san} if res.move else None,
@@ -258,6 +269,8 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
                     query = {"constraints": ctx["constraints"], "exclude": excl}
                 elif parsed["action"] == "another":
                     return chat(board, "Ask a question first, then I can show another solution.")
+                elif parsed["action"] == "castle":
+                    return chat(board, _castling_answer(board, parsed.get("side")))
                 else:
                     out = chat(board, "Open the last answer with the ▸ toggles: constraints, then the solver verdict, then the Z3 code.")
                     out["action"] = parsed["action"]

@@ -26,6 +26,7 @@ class Engine:
         self.path = path
         self._lock = threading.Lock()
         self._engine = None
+        self._failures = 0          # consecutive failures; one hiccup must not disable Stockfish for good
         # Lazy start: the UCI process is spawned on the first move request, so
         # importing the app (or probing /healthz) never leaves a process behind.
         self.available = bool(shutil.which(path)) if path else False
@@ -44,16 +45,19 @@ class Engine:
                     self._engine.configure({"Skill Level": p["skill"]})
                     res = self._engine.play(board, chess.engine.Limit(time=p["time"]))
                     if res.move is not None:
+                        self._failures = 0
                         return res.move, "stockfish"
                 except Exception as e:
-                    log.warning("stockfish failed, falling back: %s", e)
+                    self._failures += 1
+                    log.warning("stockfish failed (%d in a row), falling back: %s", self._failures, e)
                     if self._engine is not None:
                         try:
                             self._engine.close()
                         except Exception:
                             pass
-                    self._engine = None
-                    self.available = False
+                    self._engine = None            # restarted on the next request
+                    if self._failures >= 3:
+                        self.available = False
         return random.choice(list(board.legal_moves)), "random"
 
     def close(self):

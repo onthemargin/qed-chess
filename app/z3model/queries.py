@@ -40,6 +40,29 @@ def _between(a: int, b: int, step):
     return out
 
 
+def _ep_trap(m: MoveModel):
+    """Double pawn pushes that land beside an enemy pawn, i.e. moves the enemy could answer en passant.
+    Returns (Z3 term over frm/to, [(from, to), ...])."""
+    board, sign = m.board, m.sign
+    start_rank = 1 if m.us == chess.WHITE else 6
+    pairs = []
+    for sq, p in board.piece_map().items():
+        if p != chess.Piece(chess.PAWN, m.us) or chess.square_rank(sq) != start_rank:
+            continue
+        to = sq + 16 * sign
+        f, r = chess.square_file(to), chess.square_rank(to)
+        if any(0 <= f + d < 8 and board.piece_at(chess.square(f + d, r)) == chess.Piece(chess.PAWN, not m.us) for d in (-1, 1)):
+            pairs.append((sq, to))
+    term = z3.Or([z3.And(m.frm == a, m.to == b) for a, b in pairs]) if pairs else z3.BoolVal(False)
+    return term, pairs
+
+
+def _ep_code(pairs):
+    if not pairs:
+        return ""
+    return "\ns.add(Not(Or([" + ", ".join(f"And(frm == {a}, to == {b})" for a, b in pairs) + "])))  # a double push an enemy pawn could take en passant"
+
+
 def build(m: MoveModel, c: dict):
     kind = c["kind"]
     sign, occ, frm, to, piece, promo = m.sign, m.occ_before, m.frm, m.to, m.piece, m.promo
@@ -89,8 +112,10 @@ def build(m: MoveModel, c: dict):
         return z3.Or([to == sq for sq in targets]) if targets else z3.BoolVal(False), f"the move captures a {c['piece']}", \
             f"s.add(Or([to == e for e in enemy_{c['piece']}_squares]))"
     if kind == "safe":
-        return z3.Not(m.enemy_attacks(to)), "after the move no enemy piece attacks the moved piece", \
-            "s.add(Not(enemy_attacks(to)))  # evaluated on the board after the move"
+        ep, pairs = _ep_trap(m)
+        return z3.And(z3.Not(m.enemy_attacks(to)), z3.Not(ep)), \
+            "after the move no enemy piece attacks the moved piece (en passant included)", \
+            "s.add(Not(enemy_attacks(to)))  # evaluated on the board after the move" + _ep_code(pairs)
     if kind == "attacks_square":
         sq = square(c["square"])
         return m.moved_piece_attacks(sq), f"after the move the moved piece attacks {c['square']}", \
@@ -114,8 +139,10 @@ def build(m: MoveModel, c: dict):
         if board.color_at(x) != m.us:
             return z3.BoolVal(False), f"there is no piece of yours on {c['square']}", "s.add(False)  # no own piece there"
         target = z3.If(frm == x, to, x)
-        return z3.Not(m.enemy_attacks(target)), f"after the move your piece from {c['square']} is not attacked", \
-            f"s.add(Not(enemy_attacks(If(frm == {x}, to, {x}))))  # {c['square']}, wherever it ends up"
+        ep, pairs = _ep_trap(m)
+        return z3.And(z3.Not(m.enemy_attacks(target)), z3.Not(z3.And(frm == x, ep))), \
+            f"after the move your piece from {c['square']} is not attacked (en passant included)", \
+            f"s.add(Not(enemy_attacks(If(frm == {x}, to, {x}))))  # {c['square']}, wherever it ends up" + _ep_code(pairs)
     if kind == "defends":
         x = square(c["square"])
         if board.color_at(x) != m.us:

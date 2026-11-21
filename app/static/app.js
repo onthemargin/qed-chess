@@ -163,9 +163,11 @@
     from.classList.add('last'); to.classList.add('last');
   }
 
+  // While the engine is replying, the chat must not ask about a position that is about to change.
+  function lockChat(locked) { $$('#ask-text, #ask-send, #bubbles .bubble').forEach((el) => { el.disabled = locked; }); }
   async function play(uci) {
     if (state.busy) return;
-    state.busy = true;
+    state.busy = true; lockChat(true);
     if (isPhone()) setSheet(false);   // you want to see the reply land
     const t0 = Date.now();
     try {
@@ -185,7 +187,7 @@
       await refreshLegal();
       renderBoard(); saveState(); refreshBubbles();
     } catch (e) { renderBoard(); $('#legend').textContent = 'Move rejected: ' + e.message; }
-    finally { state.busy = false; }
+    finally { state.busy = false; lockChat(false); }
   }
   async function replay() {
     const j = await api('/api/replay', { moves: state.moves });
@@ -196,7 +198,7 @@
   // Stockfish moves for whichever side is to move: after you switch colours, on a reload mid-reply, or to open as White.
   async function engineMove() {
     if (state.busy || state.gameOver || turn() === state.human) return;
-    state.busy = true;
+    state.busy = true; lockChat(true);
     const t0 = Date.now();
     try {
       const j = await api('/api/engine', { fen: state.fen, moves: state.moves, preset: state.preset });
@@ -209,13 +211,13 @@
       await refreshLegal();
       renderBoard(); saveState(); refreshBubbles();
     } catch (e) { renderBoard(); $('#legend').textContent = 'Engine move failed: ' + e.message; }
-    finally { state.busy = false; }
+    finally { state.busy = false; lockChat(false); }
   }
   function engineTurn() { return !state.gameOver && turn() !== state.human; }
 
   // ---- board interaction
   $('#board').addEventListener('click', (e) => {
-    const d = e.target.closest('.sq'); if (!d || state.gameOver || state.busy) return;
+    const d = e.target.closest('.sq'); if (!d || state.gameOver || state.busy || turn() !== state.human) return;   // never move Stockfish's pieces
     const sq = d.dataset.sq;
     if (state.selected && state.legal.some((m) => m.slice(0, 4) === state.selected + sq)) { play(state.selected + sq); return; }
     const board = parseFen(state.fen);
@@ -252,6 +254,7 @@
   });
   $('#preset').addEventListener('change', (e) => { state.preset = e.target.value; saveState(); });
   function newGame() {
+    if (state.busy) { $('#legend').textContent = 'Wait for the reply to land, then start a new game.'; return; }   // the old reply would land in the new game
     state.fen = START; state.moves = []; state.sans = []; state.last = null; state.selected = null; state.gid = rid();
     state.gameOver = false; state.result = null; state.inCheck = false; state.history = [];
     $('#transcript').textContent = ''; saveChat(); save('qed.banner', false); setBanner(false);
@@ -284,11 +287,12 @@
   // ---- htmx wiring: every ask carries the position and the last answer's context
   function lastAnswer() { const all = $$('#transcript .msg.z3[data-query]'); return all[all.length - 1] || null; }
   document.body.addEventListener('htmx:configRequest', (e) => {
+    if (state.busy && /\/ask$/.test(e.detail.path)) { e.preventDefault(); $('#legend').textContent = 'Wait for the reply to land.'; return; }   // the position is about to change
     Object.assign(e.detail.headers, traceHeaders());
     const p = e.detail.parameters;
     p.fen = state.fen; p.moves = JSON.stringify(state.moves);
     const last = lastAnswer();
-    if (last) { const q = JSON.parse(last.dataset.query); p.context = JSON.stringify({ constraints: q.constraints, exclude: q.exclude, move: last.dataset.move || null }); }
+    if (last && last.dataset.fen === state.fen) { const q = JSON.parse(last.dataset.query); p.context = JSON.stringify({ constraints: q.constraints, exclude: q.exclude, move: last.dataset.move || null }); }   // "another one" only continues an answer about this position
     p.history = JSON.stringify(state.history.slice(-4));
     if (p.text) { state.history.push(String(p.text).slice(0, 120)); state.history = state.history.slice(-8); saveState(); }
   });
