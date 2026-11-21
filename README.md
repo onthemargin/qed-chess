@@ -126,12 +126,17 @@ Every ask, play, engine move and replay writes one JSON line to stdout
   short hash of the client address, never the address itself.
 - `QED_LOG_LEVEL` (default `INFO`) controls the `qed.*` loggers.
 
-On Cloud Run the lines land in Cloud Logging:
+On Cloud Run each line is ingested as a structured `jsonPayload`, so filter on
+its fields rather than grepping text (plain `gcloud run services logs read`
+does not print structured payloads):
 
 ```
-gcloud run services logs read app-gyatso-me --region us-central1 --project "$PROJECT" --limit 500 \
-  | grep -o '{"ev":.*}' | jq -c 'select(.gid=="<game id>")'
+gcloud logging read 'resource.type="cloud_run_revision" AND jsonPayload.gid="<game id>"' \
+  --project "$PROJECT" --freshness=7d --order=asc --format='value(timestamp,jsonPayload)'
 ```
+
+Other useful filters: `jsonPayload.ev="ask" AND jsonPayload.source="llm"`,
+`jsonPayload.error:*`, `jsonPayload.ms>2000`.
 
 ## Licence
 
