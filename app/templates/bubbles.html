@@ -1,0 +1,9 @@
+<div id="bubbles" class="bubbles"{% if oob %} hx-swap-oob="true"{% endif %}>
+{% for b in bubbles %}
+  {% if b.query is defined %}
+  <button type="button" class="bubble" hx-post="{{ P }}/ask" hx-target="#transcript" hx-swap="beforeend" hx-vals='{{ {"query": b.query|tojson, "label": b.label}|tojson }}'>{{ b.label }}</button>
+  {% else %}
+  <button type="button" class="bubble action" data-action="{{ b.action }}">{{ b.label }}</button>
+  {% endif %}
+{% endfor %}
+</div>

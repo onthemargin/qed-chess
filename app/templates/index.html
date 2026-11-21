@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QED Chess</title>
+<meta name="description" content="Play chess. Ask the board a question. A theorem prover answers, and shows its proof.">
+<meta name="theme-color" content="#f3f4ef">
+<link rel="manifest" href="{{ P }}/manifest.webmanifest">
+<link rel="icon" href="{{ P }}/static/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="{{ P }}/static/icons/icon-192.png">
+<link rel="stylesheet" href="{{ P }}/static/app.css?v={{ V }}">
+</head>
+<body data-prefix="{{ P }}">
+<header class="top">
+  <div class="brand">
+    <h1>QED Chess</h1>
+    <span class="status" id="status">Move 1 · White to move (you)</span>
+  </div>
+  <nav class="top-actions" id="top-actions" aria-label="Help">
+    <button type="button" class="link" data-open="how">Help</button>
+    <button type="button" class="link" data-open="model" hx-get="{{ P }}/model.html" hx-target="#model-body" hx-swap="innerHTML">Model</button>
+  </nav>
+</header>
+
+<aside class="banner" id="banner">
+  <div class="banner-text">
+    <p>Play chess. Ask the board a question. A theorem prover answers, and shows its proof.</p>
+    <p class="banner-sub">New to Z3? It is Microsoft Research’s theorem prover: give it rules and a question, and it finds an answer that fits every rule, or proves that none can exist. Here the rules are chess, the question is yours, and the proof is a move.</p>
+  </div>
+  <span class="banner-links">
+    <button type="button" class="link" id="btn-how" data-open="how">How it works</button>
+    <button type="button" class="link" id="btn-model" data-open="model" hx-get="{{ P }}/model.html" hx-target="#model-body" hx-swap="innerHTML">View the model</button>
+  </span>
+  <button type="button" class="dismiss" id="banner-dismiss" aria-label="Dismiss">×</button>
+</aside>
+
+<main class="layout">
+  <section class="pane pane-board" data-pane="board">
+    <div class="board-wrap">
+      <div class="board" id="board" aria-label="Chess board"></div>
+      <svg class="arrows" id="arrows" viewBox="0 0 8 8" aria-hidden="true">
+        <defs><marker id="arrowhead" markerWidth="4" markerHeight="4" refX="2.2" refY="2" orient="auto"><path d="M0,0 L4,2 L0,4 z" class="arrowhead"></path></marker></defs>
+      </svg>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="movelist" id="movelist"></div>
+    <div class="controls">
+      <button type="button" id="btn-undo">Undo</button>
+      <button type="button" id="btn-side" title="Switch sides in this position; Stockfish takes over your pieces">Play as Black</button>
+      <button type="button" id="btn-new">New game</button>
+      <button type="button" id="btn-pgn">Copy PGN</button>
+      <label class="preset">Opponent
+        <select id="preset">
+          {% for p in presets %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <section class="pane pane-chat" data-pane="chat" hx-indicator="#thinking" hx-disabled-elt="#ask-text, #ask-send, #bubbles .bubble">
+    <button type="button" class="sheet-handle" id="sheet-handle" aria-expanded="false" aria-controls="transcript"><span class="grip" aria-hidden="true"></span><span class="sheet-title">Assistant</span><span class="sheet-count" id="sheet-count"></span><span class="chev" aria-hidden="true"></span></button>
+    <h2 class="pane-title">Assistant</h2>
+    <div class="transcript" id="transcript" aria-live="polite"></div>
+    <div class="thinking" id="thinking" role="status"><span class="who">Z3</span><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="thinking-text">Checking every legal move…</span></div>
+    <div class="bubbles" id="bubbles" hx-post="{{ P }}/bubbles" hx-trigger="load" hx-swap="innerHTML"></div>
+    <form class="ask" id="ask-form" hx-post="{{ P }}/ask" hx-target="#transcript" hx-swap="beforeend">
+      <input type="text" name="text" id="ask-text" placeholder="Ask about this position…" maxlength="300" autocomplete="off" required>
+      <button type="submit" id="ask-send">Send</button>
+    </form>
+  </section>
+</main>
+
+<dialog id="how" class="modal">
+  <h2>How it works</h2>
+  <p><strong>Z3</strong> is a theorem prover: give it variables and rules, and it either finds values that satisfy every rule or proves that none exist.</p>
+  <ol>
+    <li>Your question becomes a few constraints on one move: which piece, where it lands, what it must do.</li>
+    <li>Those sit on a base model of this position: how pieces move, what attacks what, and that your king must be safe afterwards.</li>
+    <li><strong>SAT</strong> means a move exists, and the model <em>is</em> the move. <strong>UNSAT</strong> means those conditions cannot all hold, and Z3 can say which ones clash.</li>
+    <li>Every answer opens in three steps: plain-English constraints, the solver verdict with its model, and the Z3 code for the question, with a link to the base model it runs on.</li>
+  </ol>
+  <p class="muted">Scope: one move in the current position. Castling, en passant and move history are handled by python-chess, and every answer is cross-checked against it.</p>
+  <button type="button" class="close" data-close="how">Got it</button>
+</dialog>
+
+<dialog id="model" class="modal wide">
+  <h2>The base model</h2>
+  <p class="muted">The code below is extracted from the running solver module. Each question adds a few assertions on top; those appear under “Show Z3 code” in the chat.</p>
+  <div id="model-body"></div>
+  <button type="button" class="close" data-close="model">Close</button>
+</dialog>
+
+<script src="{{ P }}/static/vendor/htmx.min.js"></script>
+<script src="{{ P }}/static/app.js?v={{ V }}"></script>
+</body>
+</html>

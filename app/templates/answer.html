@@ -1,0 +1,31 @@
+{% set hl = a.highlights %}
+{% if question %}<div class="msg you"><span class="who">You <span class="at">{{ at }}</span></span><p>{{ question }}</p></div>{% endif %}
+<div class="msg z3 status-{{ a.status|lower }}" data-status="{{ a.status }}" data-fen="{{ fen }}" data-squares="{{ hl.squares|join(',') }}" data-arrows="{{ hl.arrows|map('join', '-')|join(',') }}"{% if a.query %} data-query='{{ a.query|tojson }}'{% endif %}{% if a.model %} data-move="{{ a.model.move }}"{% endif %}>
+  <span class="who">Z3{% if not question %} <span class="at">{{ at }}</span>{% endif %}</span>
+  <p class="answer">{{ a.answer }}{% if a.model %} <span class="muted">[highlighted on board]</span>{% endif %}</p>
+  {% if a.status in ("SAT", "UNSAT", "ERROR") and a.constraints %}
+  <details class="step step-1">
+    <summary>Constraints (plain English)</summary>
+    <ul>{% for c in a.constraints %}<li>{{ c }}</li>{% endfor %}</ul>
+  </details>
+  <details class="step step-2">
+    <summary>Solver: {{ a.status }}{% if a.model %} · model = {{ a.model.san }} ({{ a.model.move }}){% endif %}</summary>
+    {% if a.status == "UNSAT" %}
+      <p>These conditions cannot all hold in this position.</p>
+      {% if a.unsat_core %}<p>Conflict (unsat core): <code>{{ a.unsat_core|join(' ∧ ') }}</code></p>{% endif %}
+      {% if a.drop_one %}<ul>{% for d in a.drop_one %}<li>Without “{{ d.text }}”: {{ 'a solution exists' if d.sat_without else 'still impossible' }}</li>{% endfor %}</ul>{% endif %}
+    {% elif a.status == "SAT" %}
+      <p>Z3 found values for <code>frm, to, piece, promo</code> satisfying every constraint; python-chess confirmed the move is legal and does what was asked.</p>
+    {% endif %}
+    <p class="muted">Scope: {{ a.scope }}</p>
+  </details>
+  <details class="step step-3">
+    <summary>Z3 code for this question</summary>
+    <pre><code>{{ a.z3_code }}</code></pre>
+    <p class="step-foot">These assertions sit on top of the base model of the position. <button type="button" class="link inline" data-open-model hx-get="{{ P }}/model.html" hx-target="#model-body" hx-swap="innerHTML">Open the base model</button></p>
+  </details>
+  {% elif a.scope and a.status in ("SAT", "UNSAT") %}
+  <p class="muted">Scope: {{ a.scope }}</p>
+  {% endif %}
+</div>
+{% with bubbles=a.bubbles, oob=True %}{% include "bubbles.html" %}{% endwith %}

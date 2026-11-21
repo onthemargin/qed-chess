@@ -1,0 +1,15 @@
+{
+  "name": "QED Chess",
+  "short_name": "QED Chess",
+  "description": "Play chess. Ask the board a question. A theorem prover answers, and shows its proof.",
+  "start_url": "/qed-chess/",
+  "scope": "/qed-chess/",
+  "display": "standalone",
+  "background_color": "#f3f4ef",
+  "theme_color": "#f3f4ef",
+  "icons": [
+    {"src": "/qed-chess/static/icons/icon.svg", "sizes": "any", "type": "image/svg+xml"},
+    {"src": "/qed-chess/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/qed-chess/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}

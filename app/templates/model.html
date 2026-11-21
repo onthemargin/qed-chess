@@ -1,0 +1,7 @@
+{% for s in sections %}
+<details class="model-section"{% if loop.first %} open{% endif %}>
+  <summary>{{ loop.index }}. {{ s.title }}</summary>
+  <p>{{ s.intro }}</p>
+  <pre><code>{{ s.code }}</code></pre>
+</details>
+{% endfor %}
