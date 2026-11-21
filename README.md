@@ -107,6 +107,32 @@ builder stage. Start: `uvicorn app.main:app --host 127.0.0.1 --port 3006`.
   Nothing a player types is stored server-side; typed questions are sent to
   Vertex AI only when the deterministic parser cannot handle them.
 
+## Debugging with logs
+
+Every ask, play, engine move and replay writes one JSON line to stdout
+(`app/eventlog.py`), for example:
+
+```
+{"ev":"ask","sid":"7c1e…","gid":"a91b…","ip":"3f9c2a1b77","fen":"…","ply":12,"text":"can I give check","source":"typed","status":"SAT","move":"c4f7","constraints":[{"kind":"gives_check"}],"ms":41,"answer":"Yes. Bxf7+ gives check."}
+{"ev":"play","sid":"7c1e…","gid":"a91b…","fen":"…","ply":12,"preset":"club","move":"e2e4","san":"e4","reply":"c5","engine":"stockfish","game_over":false,"ms":812}
+```
+
+- `sid` is a per-browser id and `gid` a per-game id, both generated client-side
+  and sent as `X-QED-Session` / `X-QED-Game`. Filter on `gid` to replay one
+  game with its chat in order.
+- `source` says how a question was resolved: `bubble`, `typed` (deterministic
+  parser), `llm` (Gemini; `llm_kind`, `llm_ms`, `llm_error` follow) or `action`.
+- `error` carries the HTTP status and reason for rejected requests; `ip` is a
+  short hash of the client address, never the address itself.
+- `QED_LOG_LEVEL` (default `INFO`) controls the `qed.*` loggers.
+
+On Cloud Run the lines land in Cloud Logging:
+
+```
+gcloud run services logs read app-gyatso-me --region us-central1 --project "$PROJECT" --limit 500 \
+  | grep -o '{"ev":.*}' | jq -c 'select(.gid=="<game id>")'
+```
+
 ## Licence
 
 MIT, see `LICENSE`. Third-party assets keep their own licences, recorded with

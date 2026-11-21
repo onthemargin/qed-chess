@@ -201,3 +201,12 @@ def test_engine_moves_for_the_side_to_move():
     j = c.post("/qed-chess/api/engine", json={"fen": mated, "moves": [], "preset": "club"}).json()
     assert j["reply"] is None and j["game_over"] is True and j["result"] == "0-1"
     assert c.post("/qed-chess/api/engine", json={"fen": "not a fen", "moves": [], "preset": "club"}).status_code == 400
+
+
+def test_replay_rebuilds_the_game_for_undo():
+    c = make_client()
+    r = c.post("/qed-chess/api/replay", json={"moves": ["e2e4", "e7e5", "g1f3"]})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["sans"] == ["e4", "e5", "Nf3"] and j["fen"].split()[1] == "b" and "b8c6" in j["legal"]
+    assert c.post("/qed-chess/api/replay", json={"moves": ["e2e5"]}).status_code == 400

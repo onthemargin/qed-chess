@@ -21,6 +21,8 @@ from . import bubbles as bubbles_mod
 from . import explain, intent
 from .config import Settings
 from .engine import PRESETS, Engine
+from .eventlog import Timer, event, ids, ip_hash
+from .eventlog import configure as configure_logging
 from .gemini import MAX_INPUT, GeminiClient, GeminiError, default_project
 from .ratelimit import DailyCap, RateLimiter
 from .z3model import solve as solve_mod
@@ -53,6 +55,13 @@ class EngineIn(BaseModel):
     fen: str = Field(max_length=120)
     moves: list[str] = Field(default_factory=list, max_length=MAX_MOVES)
     preset: str = "club"
+
+
+class ReplayIn(BaseModel):
+    # Module level on purpose: a model defined inside create_app() cannot be resolved from the
+    # route's string annotations (from __future__ import annotations), and FastAPI then treats
+    # the body as a missing query parameter -> every /api/replay was a 400 and Undo did nothing.
+    moves: list[str] = Field(default_factory=list, max_length=MAX_MOVES)
 
 
 def _at_label(fen: str, moves: list[str]) -> str:
@@ -166,6 +175,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
     app.state.engine = engine
     app.state.gemini = gemini_client
     r = APIRouter(prefix=P)
+    configure_logging()
 
     def client_ip(request: Request) -> str:
         return request.headers.get("x-real-ip") or (request.client.host if request.client else "?")
@@ -206,25 +216,32 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
         out.update(status="CHAT", answer=reply)
         return out
 
-    def answer(payload: AskIn, request: Request) -> dict:
+    def answer(payload: AskIn, request: Request, meta: dict | None = None) -> dict:
+        meta = meta if meta is not None else {}
         board = _board(payload.fen)
         query = payload.query
         text = (payload.text or "").strip()
+        if query is not None:
+            meta["source"] = "bubble"
         if query is None and text:
             if len(text) > MAX_INPUT * 4:
                 raise HTTPException(400, "message too long")
             parsed = intent.parse(text, board)
+            meta["source"] = "typed" if parsed is not None else "llm"
             if parsed is None and app.state.gemini is not None:
                 ip = client_ip(request)
                 if not limiter.allow(ip):
                     raise HTTPException(429, "Too many questions for the assistant from this address; try the suggested questions.")
                 if not daily.allow():
                     return unsupported(board, text)
+                llm_t = Timer()
                 try:
                     out = app.state.gemini.classify(text, payload.fen, payload.history)
                 except GeminiError as e:
+                    meta["llm_ms"] = llm_t.ms(); meta["llm_error"] = str(e)[:200]
                     log.warning("gemini failed: %s", e)
                     return unsupported(board, text)
+                meta["llm_ms"] = llm_t.ms(); meta["llm_kind"] = out.get("kind")
                 if out["kind"] == "query" and out["constraints"]:
                     parsed = {"constraints": out["constraints"]}
                 else:
@@ -232,6 +249,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
             if parsed is None:
                 return unsupported(board, text)
             if "action" in parsed:
+                meta["source"] = "action"; meta["action"] = parsed["action"]
                 ctx = payload.context or {}
                 if parsed["action"] == "another" and ctx.get("constraints") is not None:
                     excl = list(ctx.get("exclude") or []) + ([ctx["move"]] if ctx.get("move") else [])
@@ -250,6 +268,28 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
         exclude = _validate_exclude((query.get("exclude") or []) + (payload.exclude or []), board)
         return run_query(board, constraints, exclude)
 
+    def answer_logged(payload: AskIn, request: Request) -> dict:
+        """answer() plus one `ask` event, whatever the outcome."""
+        t, meta = Timer(), {}
+        try:
+            data = answer(payload, request, meta)
+            meta.setdefault("status", data.get("status"))
+            if data.get("model"):
+                meta["move"] = data["model"]["move"]
+            if data.get("query"):
+                meta["constraints"] = data["query"].get("constraints")
+                if data["query"].get("exclude"):
+                    meta["exclude"] = data["query"]["exclude"]
+            meta["answer"] = (data.get("answer") or "")[:160]
+            return data
+        except HTTPException as e:
+            meta["error"] = f"{e.status_code} {e.detail}"
+            raise
+        finally:
+            text = (payload.text or "").strip()
+            event("ask", **ids(request), ip=ip_hash(client_ip(request)), fen=payload.fen, ply=len(payload.moves),
+                  text=text[:300] or None, ms=t.ms(), **meta)
+
     # ---------------------------------------------------------------- routes
     @r.get("/", response_class=HTMLResponse)
     def index(request: Request):
@@ -262,7 +302,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
 
     @r.post("/api/ask")
     def api_ask(payload: AskIn, request: Request):
-        return answer(payload, request)
+        return answer_logged(payload, request)
 
     @r.post("/ask", response_class=HTMLResponse)
     def htmx_ask(request: Request, fen: str = Form(...), moves: str = Form("[]"), text: str = Form(None),
@@ -276,7 +316,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
         except (ValueError, TypeError):
             raise HTTPException(400, "bad form payload")
         try:
-            data = answer(payload, request)
+            data = answer_logged(payload, request)
         except HTTPException as e:
             data = {"status": "ERROR", "answer": str(e.detail), "constraints": [], "model": None, "z3_code": "",
                     "scope": "", "unsat_core": [], "drop_one": [], "highlights": {"squares": [], "arrows": []},
@@ -306,7 +346,17 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
                 "game_over": board.is_game_over(), "result": board.result() if board.is_game_over() else None}
 
     @r.post("/api/play")
-    def play(payload: PlayIn):
+    def play(payload: PlayIn, request: Request):
+        t, meta = Timer(), {}
+        try:
+            return _play(payload, meta)
+        except HTTPException as e:
+            meta["error"] = f"{e.status_code} {e.detail}"
+            raise
+        finally:
+            event("play", **ids(request), fen=payload.fen, ply=len(payload.moves), preset=payload.preset, move=payload.move, ms=t.ms(), **meta)
+
+    def _play(payload: PlayIn, meta: dict) -> dict:
         board = _board(payload.fen)
         try:
             mv = chess.Move.from_uci(payload.move)
@@ -319,6 +369,7 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
             if mv not in board.legal_moves:
                 raise HTTPException(400, "illegal move")
         human_san = board.san(mv)
+        meta["san"] = human_san
         board.push(mv)
         out = {"human": {"uci": mv.uci(), "san": human_san, "fen": board.fen()}, "reply": None,
                "game_over": board.is_game_over(), "result": board.result() if board.is_game_over() else None,
@@ -331,11 +382,22 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
             out["engine"] = kind
             out.update(game_over=board.is_game_over(), result=board.result() if board.is_game_over() else None,
                        in_check=board.is_check())
+        meta.update(reply=out["reply"]["san"] if out["reply"] else None, engine=out["engine"], game_over=out["game_over"], result=out["result"])
         return out
 
     @r.post("/api/engine")
-    def engine_move(payload: EngineIn):
+    def engine_move(payload: EngineIn, request: Request):
         """The engine moves for whichever side is to move: used when the human switches colours."""
+        t, meta = Timer(), {}
+        try:
+            return _engine_move(payload, meta)
+        except HTTPException as e:
+            meta["error"] = f"{e.status_code} {e.detail}"
+            raise
+        finally:
+            event("engine", **ids(request), fen=payload.fen, ply=len(payload.moves), preset=payload.preset, ms=t.ms(), **meta)
+
+    def _engine_move(payload: EngineIn, meta: dict) -> dict:
         board = _board(payload.fen)
         out = {"reply": None, "engine": None, "game_over": board.is_game_over(),
                "result": board.result() if board.is_game_over() else None, "in_check": board.is_check()}
@@ -347,13 +409,12 @@ def create_app(settings: Settings | None = None, gemini_client=None, engine: Eng
             out["engine"] = kind
             out.update(game_over=board.is_game_over(), result=board.result() if board.is_game_over() else None,
                        in_check=board.is_check())
+        meta.update(reply=out["reply"]["san"] if out["reply"] else None, engine=out["engine"], game_over=out["game_over"], result=out["result"])
         return out
 
-    class ReplayIn(BaseModel):
-        moves: list[str] = Field(default_factory=list, max_length=MAX_MOVES)
-
     @r.post("/api/replay")
-    def replay(payload: ReplayIn):
+    def replay(payload: ReplayIn, request: Request):
+        event("replay", **ids(request), ply=len(payload.moves))
         board = chess.Board()
         sans = []
         for u in payload.moves:

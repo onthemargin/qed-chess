@@ -12,15 +12,20 @@
   const reducedMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  const state = { fen: START, moves: [], sans: [], preset: 'club', human: 'w', legal: [],
+  // Trace ids: one per browser (session) and one per game, sent as headers so server logs can follow a game.
+  function rid() { const a = new Uint8Array(8); if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(a); else for (let i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 256); return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join(''); }
+  const state = { fen: START, moves: [], sans: [], preset: 'club', human: 'w', legal: [], gid: rid(),
                   selected: null, last: null, gameOver: false, result: null, inCheck: false, history: [], busy: false };
   const flipped = () => state.human === 'b';   // the board always faces the human
 
   // ---- storage (always guarded: private windows / blocked storage must not break the page)
   function load(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; } }
   function save(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ } }
-  function saveState() { save('qed.state', { fen: state.fen, moves: state.moves, sans: state.sans, preset: state.preset, human: state.human, last: state.last, gameOver: state.gameOver, result: state.result, inCheck: state.inCheck, history: state.history }); }
+  function saveState() { save('qed.state', { fen: state.fen, moves: state.moves, sans: state.sans, preset: state.preset, human: state.human, gid: state.gid, last: state.last, gameOver: state.gameOver, result: state.result, inCheck: state.inCheck, history: state.history }); }
   function saveChat() { save('qed.chat', $('#transcript').innerHTML); }
+
+  const SID = load('qed.sid', null) || rid(); save('qed.sid', SID);
+  const traceHeaders = () => ({ 'X-QED-Session': SID, 'X-QED-Game': state.gid || '' });
 
   const $ = (s, el) => (el || document).querySelector(s);
   const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
@@ -120,7 +125,7 @@
 
   // ---- server calls
   async function api(path, body, method) {
-    const res = await fetch(P + path, { method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    const res = await fetch(P + path, { method: method || 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, traceHeaders()), body: body ? JSON.stringify(body) : undefined });
     if (!res.ok) { let msg = res.statusText; try { msg = (await res.json()).error || msg; } catch (e) { /* ignore */ } throw new Error(msg); }
     return res.json();
   }
@@ -247,7 +252,7 @@
   });
   $('#preset').addEventListener('change', (e) => { state.preset = e.target.value; saveState(); });
   function newGame() {
-    state.fen = START; state.moves = []; state.sans = []; state.last = null; state.selected = null;
+    state.fen = START; state.moves = []; state.sans = []; state.last = null; state.selected = null; state.gid = rid();
     state.gameOver = false; state.result = null; state.inCheck = false; state.history = [];
     $('#transcript').textContent = ''; saveChat(); save('qed.banner', false); setBanner(false);
     clearHighlightsAfterMove();
@@ -279,6 +284,7 @@
   // ---- htmx wiring: every ask carries the position and the last answer's context
   function lastAnswer() { const all = $$('#transcript .msg.z3[data-query]'); return all[all.length - 1] || null; }
   document.body.addEventListener('htmx:configRequest', (e) => {
+    Object.assign(e.detail.headers, traceHeaders());
     const p = e.detail.parameters;
     p.fen = state.fen; p.moves = JSON.stringify(state.moves);
     const last = lastAnswer();
@@ -325,7 +331,7 @@
   // ---- boot
   (async function boot() {
     const saved = load('qed.state', null);
-    if (saved && saved.fen) { Object.assign(state, saved); if (saved.human !== 'w' && saved.human !== 'b') state.human = 'w'; delete state.flipped; }
+    if (saved && saved.fen) { Object.assign(state, saved); if (saved.human !== 'w' && saved.human !== 'b') state.human = 'w'; delete state.flipped; if (!state.gid) state.gid = rid(); }
     $('#preset').value = state.preset;
     const chat = load('qed.chat', '');
     if (chat) { $('#transcript').innerHTML = chat; htmx.process($('#transcript')); }
